@@ -1,0 +1,1 @@
+# control-perecederos-scanner
