@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#202225">
+<title>Control de Perecederos · Escáner móvil</title>
+<meta name="application-version" content="3.2.26">
+<style>
+:root{--bg:#202225;--panel:#292c31;--field:#34383e;--fg:#f2f3f5;--muted:#c3c7ce;--border:#4a4f57;--accent:#3976c6;--accent2:#315f91;--danger:#542c31;--dangerfg:#ffd9dc;--ok:#86d6a3;--warn:#f4c86b}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+body{padding:max(10px,env(safe-area-inset-top)) 10px max(12px,env(safe-area-inset-bottom))}.card{max-width:560px;margin:0 auto;background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:16px;box-shadow:0 10px 30px #00000042}
+h1{font-size:25px;margin:0 0 6px}.status{font-size:16px;line-height:1.35;min-height:43px;margin:6px 0 8px;color:var(--fg)}.ok{color:var(--ok)}.err{color:#ffb4b4}.warn{color:var(--warn)}.muted{font-size:13px;color:var(--muted);line-height:1.4}
+.toprow{display:grid;grid-template-columns:minmax(88px,auto) 1fr;gap:8px;align-items:center;margin:2px 0 8px}#timer{display:flex;align-items:center;justify-content:center;min-height:52px;padding:0 12px;border:1px solid var(--border);border-radius:13px;background:var(--field);font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--fg)}.toprow button{margin:0}
+.camera{position:relative;width:100%;aspect-ratio:4/3;background:#15171a;border-radius:16px;overflow:hidden;border:1px solid var(--border)}video{width:100%;height:100%;object-fit:cover;display:block}.camera.paused video{filter:brightness(.48)}
+.guide{position:absolute;left:8%;right:8%;top:28%;height:44%;border:3px solid rgba(242,243,245,.95);border-radius:15px;box-shadow:0 0 0 999px rgba(0,0,0,.16);pointer-events:none}.guide:after{content:'Apunta al código';position:absolute;left:50%;bottom:-34px;transform:translateX(-50%);white-space:nowrap;color:var(--fg);font-weight:700;text-shadow:0 1px 3px #000;font-size:15px}
+#cameraMsg{position:absolute;left:10px;right:10px;top:10px;background:rgba(32,34,37,.88);color:var(--fg);border:1px solid var(--border);padding:8px 10px;border-radius:10px;font-size:13px;text-align:center}.hidden{display:none!important}
+input,button{width:100%;min-height:52px;border-radius:13px;font-size:18px;padding:12px 14px}input{border:2px solid var(--border);margin:9px 0 5px;background:var(--field);color:var(--fg);font-weight:650;outline:none}input:focus{border-color:var(--accent)}input::placeholder{color:#9da3ad}button{border:1px solid var(--accent);background:var(--accent);color:#fff;font-weight:750;margin:5px 0}button:active{background:var(--accent2)}button.secondary{background:var(--field);border-color:var(--border);color:var(--fg)}button.danger{background:var(--danger);border-color:#744047;color:var(--dangerfg)}button.ghost{background:var(--field);border-color:var(--border);color:var(--fg)}button:disabled,input:disabled{opacity:.5}.actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.last{font-weight:700;min-height:22px;margin-top:4px;color:var(--muted)}.detected{border-color:var(--accent)!important;background:#2f3f55!important;color:var(--fg)!important}
+</style>
+<script src="https://unpkg.com/@zxing/browser@0.2.1" defer></script>
+</head>
+<body>
+<main class="card">
+<h1>📱 Control de Perecederos</h1>
+<div id="status" class="status">Conectando con la sesión del PC…</div>
+<div class="toprow">
+  <div id="timer">05:00</div>
+  <button id="switchCamera" class="ghost">↻ Cambiar cámara</button>
+</div>
+<div id="camera" class="camera">
+  <video id="video" playsinline muted></video>
+  <div class="guide"></div>
+  <div id="cameraMsg">Iniciando cámara…</div>
+</div>
+<button id="retryCamera" class="ghost hidden">Reintentar cámara</button>
+<input id="code" autocomplete="off" autocapitalize="off" inputmode="text" enterkeyhint="send" placeholder="Código detectado o manual">
+<div class="actions">
+  <button id="send">Enviar</button>
+  <button id="cancel" class="secondary">Cancelar</button>
+</div>
+<div id="last" class="last"></div>
+<button id="end" class="danger">Terminar sesión</button>
+<p class="muted">La cámara trasera se intenta seleccionar al abrir. El botón Cambiar cámara alterna entre cámaras físicas disponibles. Solo se envía el texto del código; el vídeo no sale del móvil. <span style="opacity:.65">Web v3.2.27</span></p>
+</main>
+<script>
+(() => {
+'use strict';
+const p=new URLSearchParams(location.hash.replace(/^#/,''));
+const token=p.get('token')||'', topic=p.get('topic')||'', exp=Number(p.get('exp')||0);
+const relays=['https://ntfy.tedomum.fr','https://ntfy.adminforge.de','https://ntfy.sh'];
+const status=document.getElementById('status'), timer=document.getElementById('timer'), code=document.getElementById('code'), send=document.getElementById('send'), cancel=document.getElementById('cancel'), end=document.getElementById('end'), last=document.getElementById('last');
+const camera=document.getElementById('camera'), video=document.getElementById('video'), cameraMsg=document.getElementById('cameraMsg'), retryCamera=document.getElementById('retryCamera'), switchCamera=document.getElementById('switchCamera');
+let ended=false, helloTimer=null, stream=null, detector=null, scanTimer=null, zxingControls=null, pendingCode=false, scanning=false, lastDetected='', lastDetectedAt=0;
+let videoDevices=[], currentDeviceId='', currentFacing='', cameraBusy=false;
+let sendGeneration=0, activeSendControllers=[], preferredRelay='', helloBusy=false, sessionLinked=false;
+function setStatus(t,k=''){status.textContent=t;status.className='status '+k}
+function valid(){return token.length>=20 && /^cp-[a-f0-9]{20,}$/i.test(topic) && exp>0}
+function setCameraMsg(t,hide=false){cameraMsg.textContent=t;cameraMsg.classList.toggle('hidden',!!hide)}
+function makeId(){try{return crypto.randomUUID()}catch(_){return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)}}
+function stopTracks(s){if(!s)return;for(const tr of s.getTracks())try{tr.stop()}catch(_){}}
+function stopCamera(){scanning=false;if(scanTimer){clearTimeout(scanTimer);scanTimer=null}if(zxingControls){try{zxingControls.stop()}catch(_){ }zxingControls=null}if(stream){stopTracks(stream);stream=null}try{if(video.srcObject)stopTracks(video.srcObject);video.srcObject=null}catch(_){}}
+function disableAll(){ended=true;stopCamera();[code,send,cancel,end,retryCamera,switchCamera].forEach(x=>x.disabled=true);if(helloTimer)clearInterval(helloTimer)}
+async function fetchTimed(url,options={},timeoutMs=3000,controllerSink=null){
+  const ac=new AbortController();
+  if(controllerSink)controllerSink.push(ac);
+  const timerId=setTimeout(()=>{try{ac.abort()}catch(_){ }},timeoutMs);
+  try{
+    return await fetch(url,{...options,signal:ac.signal,cache:'no-store'});
+  } finally {
+    clearTimeout(timerId);
+    if(controllerSink){const i=controllerSink.indexOf(ac);if(i>=0)controllerSink.splice(i,1)}
+  }
+}
+async function postOne(base,body,controllerSink=null){
+  // text/plain is a simple CORS request. Unlike no-cors, this lets us verify
+  // the relay really accepted the message instead of treating an opaque 4xx
+  // response as success.
+  const r=await fetchTimed(base+'/'+encodeURIComponent(topic),{
+    method:'POST',
+    headers:{'Content-Type':'text/plain'},
+    body
+  },2600,controllerSink);
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  return base;
+}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+async function waitForPcAck(base,mid,ackFor,startedUnix,controllerSink=null){
+  const deadline=Date.now()+4300;
+  let lastErr=null;
+  while(Date.now()<deadline){
+    try{
+      const u=base+'/'+encodeURIComponent(topic)+'/json?poll=1&since='+encodeURIComponent(String(startedUnix))+'&_='+Date.now();
+      const r=await fetchTimed(u,{method:'GET',headers:{'Accept':'application/x-ndjson'}},1800,controllerSink);
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      const text=await r.text();
+      for(const line of text.split(/\r?\n/)){
+        if(!line.trim())continue;
+        try{
+          const ev=JSON.parse(line);
+          if(ev.event!=='message')continue;
+          const m=JSON.parse(String(ev.message||''));
+          if(m.type==='ack'&&m.token===token&&m.mid===mid&&m.ack_for===ackFor)return true;
+        }catch(_){ }
+      }
+    }catch(e){
+      if(e&&e.name==='AbortError')throw e;
+      lastErr=e;
+    }
+    await sleep(220);
+  }
+  throw new Error(lastErr&&lastErr.message?lastErr.message:'el PC no confirmó la recepción');
+}
+async function deliverOne(base,obj,mid,startedUnix,controllerSink=null){
+  const body=JSON.stringify({...obj,token,mid});
+  await postOne(base,body,controllerSink);
+  await waitForPcAck(base,mid,String(obj.type||''),startedUnix,controllerSink);
+  return base;
+}
+async function publishConfirmed(obj,controllerSink=null){
+  const mid=obj.mid||makeId();
+  const startedUnix=Math.max(0,Math.floor(Date.now()/1000)-2);
+  const ordered=preferredRelay?[preferredRelay,...relays.filter(r=>r!==preferredRelay)]:[...relays];
+  // Try all candidates concurrently, but only report success after an ACK
+  // generated by the PC itself. This is an end-to-end confirmation.
+  return await new Promise((resolve,reject)=>{
+    let failed=0,settled=false,lastErr=null;
+    for(const base of ordered){
+      deliverOne(base,{...obj,mid},mid,startedUnix,controllerSink).then(okBase=>{
+        if(settled)return;settled=true;preferredRelay=okBase;sessionLinked=true;resolve(okBase);
+      }).catch(e=>{
+        lastErr=e;failed++;
+        if(!settled&&failed===ordered.length){
+          const msg=(lastErr&&lastErr.name==='AbortError')?'Operación cancelada':
+            'Ningún canal confirmó que el código llegara al PC.';
+          reject(new Error(msg));
+        }
+      });
+    }
+  });
+}
+async function publishBestEffort(obj,controllerSink=null){
+  const mid=obj.mid||makeId();
+  const body=JSON.stringify({...obj,token,mid});
+  const ordered=preferredRelay?[preferredRelay,...relays.filter(r=>r!==preferredRelay)]:[...relays];
+  await Promise.allSettled(ordered.map(r=>postOne(r,body,controllerSink)));
+}
+function abortActiveSend(){
+  for(const ac of activeSendControllers.splice(0)){try{ac.abort()}catch(_){ }}
+}
+async function hello(silent=false){
+  if(ended||!valid()||helloBusy||sessionLinked)return;
+  helloBusy=true;
+  try{
+    await publishConfirmed({type:'hello',time:Date.now(),mid:makeId()});
+    setStatus('✓ Sesión enlazada con el PC. Apunta la cámara al código.','ok');
+  }catch(e){
+    if(!silent)setStatus('Aún no hay confirmación del PC. Puedes seguir con la cámara y reintentaremos.','warn');
+  }finally{helloBusy=false}
+}
+function pauseForCode(v){
+  if(ended||pendingCode)return;v=String(v||'').trim();if(!v)return;
+  const now=Date.now();if(v===lastDetected && now-lastDetectedAt<1500)return;lastDetected=v;lastDetectedAt=now;
+  pendingCode=true;code.value=v;code.classList.add('detected');camera.classList.add('paused');setCameraMsg('Código leído. Confirma Enviar o Cancelar.');setStatus('Código detectado. Confirma antes de continuar.','ok');
+  if(navigator.vibrate)try{navigator.vibrate(60)}catch(_){ }
+}
+function resumeScanning(){pendingCode=false;code.value='';code.classList.remove('detected');camera.classList.remove('paused');setCameraMsg('Apunta al siguiente código.',false);setStatus('✓ Lector activo. Apunta al siguiente código.','ok')}
+async function nativeLoop(){
+  if(!scanning||ended)return;
+  if(!pendingCode && detector && video.readyState>=2){
+    try{const found=await detector.detect(video);if(found&&found.length)pauseForCode(found[0].rawValue)}catch(_){ }
+  }
+  scanTimer=setTimeout(nativeLoop,120);
+}
+function labelFacing(label){
+  const s=String(label||'').toLowerCase();
+  if(/front|user|delantera|frontal|selfie/.test(s))return 'user';
+  if(/back|rear|environment|trasera|posterior|world/.test(s))return 'environment';
+  return '';
+}
+async function refreshDevices(){
+  try{videoDevices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput')}catch(_){videoDevices=[]}
+  return videoDevices;
+}
+function trackInfo(){
+  try{
+    const tr=(stream&&stream.getVideoTracks()[0])||(video.srcObject&&video.srcObject.getVideoTracks()[0]);
+    if(!tr)return {id:currentDeviceId,facing:currentFacing,label:''};
+    const st=tr.getSettings?tr.getSettings():{};
+    const facing=st.facingMode||labelFacing(tr.label)||currentFacing||'';
+    return {id:st.deviceId||currentDeviceId||'',facing,label:tr.label||''};
+  }catch(_){return {id:currentDeviceId,facing:currentFacing,label:''}}
+}
+function updateCameraButton(){
+  const info=trackInfo(); currentDeviceId=info.id||currentDeviceId; currentFacing=info.facing||currentFacing;
+  switchCamera.textContent='↻ Cambiar cámara';
+}
+function findDeviceForFacing(wanted,excludeId=''){
+  const byLabel=videoDevices.find(d=>d.deviceId!==excludeId && labelFacing(d.label)===wanted);
+  if(byLabel)return byLabel;
+  return videoDevices.find(d=>d.deviceId!==excludeId)||null;
+}
+async function unlockAndChooseRear(){
+  await refreshDevices();
+  let rear=findDeviceForFacing('environment','');
+  if(rear && rear.label)return rear.deviceId;
+  // Device labels are usually hidden until camera permission has been granted.
+  let probe=null;
+  try{probe=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false})}catch(_){ }
+  stopTracks(probe);
+  await refreshDevices();
+  rear=findDeviceForFacing('environment','');
+  return rear?rear.deviceId:'';
+}
+function exactConstraint(deviceId){return {video:{deviceId:{exact:deviceId},width:{ideal:1280},height:{ideal:720}},audio:false}}
+function facingConstraint(wanted,exact=false){return {video:{facingMode:exact?{exact:wanted||'environment'}:{ideal:wanted||'environment'},width:{ideal:1280},height:{ideal:720}},audio:false}}
+async function acquireStream(deviceId='',wanted='environment'){
+  if(deviceId){
+    try{return await navigator.mediaDevices.getUserMedia(exactConstraint(deviceId))}catch(_){ }
+  }
+  // First demand the requested facing mode. Only fall back to ideal if the
+  // browser/device cannot satisfy an exact request.
+  try{return await navigator.mediaDevices.getUserMedia(facingConstraint(wanted,true))}catch(_){ }
+  return await navigator.mediaDevices.getUserMedia(facingConstraint(wanted,false));
+}
+async function startNative(deviceId='',wanted='environment'){
+  if(!('BarcodeDetector' in window))return false;
+  let formats=[];try{formats=await BarcodeDetector.getSupportedFormats()}catch(_){ }
+  const wantedFormats=['ean_13','ean_8','code_128','code_39','codabar','itf','upc_a','upc_e','qr_code','data_matrix'];
+  const use=wantedFormats.filter(x=>formats.includes(x));
+  try{detector=new BarcodeDetector(use.length?{formats:use}:undefined)}catch(_){detector=new BarcodeDetector()}
+  stream=await acquireStream(deviceId,wanted);
+  video.srcObject=stream;await video.play();scanning=true;await refreshDevices();
+  const info=trackInfo();currentDeviceId=info.id||deviceId||'';currentFacing=info.facing||wanted||'';
+  updateCameraButton();setCameraMsg('Apunta al código.',false);nativeLoop();return true;
+}
+async function startZXing(deviceId='',wanted='environment'){
+  if(!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader)return false;
+  const reader=new ZXingBrowser.BrowserMultiFormatReader();
+  const cb=(result,error,controls)=>{if(controls)zxingControls=controls;if(result&&!pendingCode&&!ended)pauseForCode(result.getText())};
+  if(deviceId && typeof reader.decodeFromVideoDevice==='function')zxingControls=await reader.decodeFromVideoDevice(deviceId,video,cb);
+  else zxingControls=await reader.decodeFromConstraints(facingConstraint(wanted),video,cb);
+  scanning=true;await new Promise(r=>setTimeout(r,120));await refreshDevices();
+  const info=trackInfo();currentDeviceId=info.id||deviceId||'';currentFacing=info.facing||wanted||'';
+  updateCameraButton();setCameraMsg('Apunta al código.',false);return true;
+}
+async function startCamera(deviceId='',wanted='environment'){
+  if(ended||cameraBusy)return;cameraBusy=true;stopCamera();retryCamera.classList.add('hidden');setCameraMsg('Iniciando cámara…',false);
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){setCameraMsg('Este navegador no permite cámara web. Puedes escribir el código manualmente.');retryCamera.classList.remove('hidden');cameraBusy=false;return}
+  try{
+    if(!deviceId && wanted==='environment')deviceId=await unlockAndChooseRear();
+    try{if(await startNative(deviceId,wanted)){cameraBusy=false;return}}catch(_){stopCamera()}
+    try{if(await startZXing(deviceId,wanted)){cameraBusy=false;return}}catch(e){stopCamera();setCameraMsg('No se pudo abrir el lector: '+(e.message||e));retryCamera.classList.remove('hidden');setStatus('Puedes introducir el código manualmente o reintentar la cámara.','warn');cameraBusy=false;return}
+    setCameraMsg('Este navegador no dispone de detector de códigos. Puedes introducir el código manualmente.');retryCamera.classList.remove('hidden');setStatus('Lector automático no disponible en este navegador.','warn');
+  }finally{cameraBusy=false}
+}
+async function switchPhysicalCamera(){
+  if(ended||cameraBusy)return;
+  switchCamera.disabled=true;
+  try{
+    await refreshDevices();
+    if(videoDevices.length<2){setStatus('Solo se detecta una cámara disponible en este navegador.','warn');return}
+    const info=trackInfo();
+    const fromId=info.id||currentDeviceId;
+    let target=null;
+    // Prefer an explicit opposite-facing camera when labels/settings expose it.
+    const fromFacing=info.facing||currentFacing||labelFacing(info.label);
+    if(fromFacing){target=findDeviceForFacing(fromFacing==='user'?'environment':'user',fromId)}
+    // Some Android browsers expose generic labels and ignore facingMode. In that
+    // case cycle by the physical deviceId; this guarantees a different camera.
+    if(!target){
+      let idx=videoDevices.findIndex(d=>d.deviceId===fromId);
+      if(idx<0)idx=0;
+      for(let step=1;step<=videoDevices.length;step++){
+        const d=videoDevices[(idx+step)%videoDevices.length];
+        if(d&&d.deviceId&&d.deviceId!==fromId){target=d;break}
+      }
+    }
+    if(!target){setStatus('No se encontró otra cámara física disponible.','warn');return}
+    setStatus('Cambiando cámara…');
+    const wanted=labelFacing(target.label)||'';
+    await startCamera(target.deviceId,wanted||'environment');
+    const after=trackInfo();
+    if(after.id&&fromId&&after.id===fromId)setStatus('El navegador devolvió la misma cámara. Pulsa de nuevo para probar la siguiente.','warn');
+    else setStatus('✓ Cámara cambiada.','ok');
+  }catch(e){setStatus('No se pudo cambiar la cámara: '+(e.message||e),'err')}
+  finally{if(!ended)switchCamera.disabled=false}
+}
+async function sendCode(v){
+  v=String(v||'').trim();if(!v){setStatus('Lee o introduce un código.');return}if(ended)return;
+  if(Date.now()/1000>=exp){setStatus('La sesión ha caducado. Genera un nuevo QR en el PC.','err');disableAll();return}
+  const generation=++sendGeneration;
+  abortActiveSend();
+  send.disabled=true; // Cancel stays active so a stalled send can always be abandoned.
+  setStatus('Enviando código…');
+  try{
+    const usedRelay=await publishConfirmed({type:'scan',code:v,time:Date.now(),mid:makeId()},activeSendControllers);
+    if(generation!==sendGeneration||ended)return;
+    last.textContent='✓ Entregado al PC: '+v;resumeScanning();
+  } catch(e){
+    if(generation!==sendGeneration||ended)return;
+    const msg=(e&&e.name==='AbortError')?'Tiempo de espera agotado':(e.message||e);
+    setStatus('No se pudo enviar: '+msg,'err');
+  } finally {
+    if(generation===sendGeneration&&!ended)send.disabled=false;
+  }
+}
+send.onclick=()=>sendCode(code.value);
+cancel.onclick=()=>{sendGeneration++;abortActiveSend();send.disabled=false;resumeScanning();last.textContent='Código cancelado.'};
+code.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendCode(code.value)}});
+retryCamera.onclick=()=>startCamera('',currentFacing||'environment');
+switchCamera.onclick=switchPhysicalCamera;
+end.onclick=async()=>{if(ended)return;if(!confirm('¿Terminar la sesión móvil?'))return;sendGeneration++;abortActiveSend();try{await publishBestEffort({type:'end',time:Date.now(),mid:makeId()})}catch(_){ }setStatus('Sesión terminada.','ok');timer.textContent='00:00';disableAll()};
+function tick(){if(ended)return;const s=Math.max(0,Math.ceil(exp-Date.now()/1000));timer.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(s<=0){setStatus('Sesión caducada. Genera un nuevo QR en el PC.','err');disableAll()}}
+window.addEventListener('pagehide',stopCamera);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&!ended&&!stream&&!zxingControls&&!cameraBusy)startCamera('',currentFacing||'environment')});
+if(!valid()){setStatus('QR de sesión no válido. Vuelve a abrir Escáner móvil en el PC.','err');disableAll()}else{
+  hello(false);helloTimer=setInterval(()=>hello(true),4500);setTimeout(()=>{if(helloTimer){clearInterval(helloTimer);helloTimer=null}},22000);setInterval(tick,500);tick();
+  setTimeout(()=>startCamera('','environment'),120);
+}
+})();
+</script>
+</body>
+</html>
